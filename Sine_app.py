@@ -106,8 +106,8 @@ preset = st.sidebar.selectbox(
 # sensible defaults per preset
 defaults = {
     "Custom": dict(),
-    "Lo-Fi Tremolo": dict(w1="Sine", f1=220, a1=0.8, p1=0.0,
-                         w2="Triangle", f2=220, a2=0.25, p2=0.2,
+    "Lo-Fi Tremolo": dict(w1="Sine", f1=335, a1=0.4, p1=0.0,
+                         w2="Triangle", f2=94, a2=0.25, p2=0.2,
                          am_on=True, am_rate=6.0, am_depth=0.55,
                          fm_on=False, fm_rate=0.0, fm_depth=0.0,
                          noise=0.03, attack=0.02, decay=1.2),
