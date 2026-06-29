@@ -1,289 +1,214 @@
+"""
+King Shot — Bear Trap Rally Planner
+Single-file Streamlit app. Deploy on Streamlit Cloud with main file: app.py
+"""
+
 import streamlit as st
-import numpy as np
-import plotly.graph_objects as go
+import pandas as pd
 
-# -----------------------------
-# Page + Styling
-# -----------------------------
-st.set_page_config(page_title="Wave Synth Lab", layout="wide")
+# ── Game constants ──────────────────────────────────────────────────────────
+TRAP_WINDOW_SEC = 30 * 60   # 30 minutes countdown
+RALLY_FILL_SEC = 5 * 60     # 5 minutes to fill a rally before it marches
 
-st.markdown(
-    """
-    <style>
-      .block-container {padding-top: 1.2rem;}
-      .big-title {font-size: 2.2rem; font-weight: 800; letter-spacing: -0.02em;}
-      .subtitle {opacity: 0.85; margin-top: -0.4rem;}
-      .pill {display:inline-block; padding: 0.25rem 0.6rem; border-radius: 999px; 
-             background: rgba(99,102,241,0.15); border: 1px solid rgba(99,102,241,0.35);
-             margin-right: 0.4rem; font-size: 0.85rem;}
-      .panel {padding: 1rem; border-radius: 18px; background: rgba(255,255,255,0.03);
-              border: 1px solid rgba(255,255,255,0.08);}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+# ── Timing logic ────────────────────────────────────────────────────────────
+def format_time(seconds: int) -> str:
+    s = max(0, round(seconds))
+    m, sec = divmod(s, 60)
+    return f"{m:02d}:{sec:02d}"
 
-st.markdown('<div class="big-title">🎛️ Wave Synth Lab</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="subtitle">Mix oscillators, add AM/FM modulation, inspect spectrum, and play sound.</div>',
-    unsafe_allow_html=True
-)
-st.markdown(
-    '<span class="pill">2 Oscillators</span>'
-    '<span class="pill">AM / FM</span>'
-    '<span class="pill">Spectrum</span>'
-    '<span class="pill">Lissajous</span>'
-    '<span class="pill">Audio</span>',
-    unsafe_allow_html=True
-)
+def format_countdown(elapsed_sec: int) -> str:
+    """Show time remaining on the 30-minute trap timer."""
+    return format_time(TRAP_WINDOW_SEC - elapsed_sec)
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def osc_wave(wave_type, t, freq, phase):
-    x = 2 * np.pi * freq * t + phase
-    if wave_type == "Sine":
-        return np.sin(x)
-    if wave_type == "Square":
-        return np.sign(np.sin(x))
-    if wave_type == "Triangle":
-        # Triangle via arcsin(sin)
-        return (2 / np.pi) * np.arcsin(np.sin(x))
-    if wave_type == "Saw":
-        # Sawtooth in [-1, 1]
-        return 2 * (x / (2*np.pi) - np.floor(0.5 + x / (2*np.pi)))
-    return np.sin(x)
+def distribute_rallies_across_waves(total_rallies: int, wave_count: int) -> list:
+    if total_rallies <= 0 or wave_count <= 0:
+        return []
+    waves = [[] for _ in range(wave_count)]
+    for i in range(total_rallies):
+        waves[i % wave_count].append(i + 1)
+    return [w for w in waves if w]
 
-def nice_plot(x, y, title, xlab="Time (s)", ylab="Amplitude"):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=y, mode="lines", line=dict(width=3)))
-    fig.update_layout(
-        title=title,
-        height=420,
-        margin=dict(l=10, r=10, t=60, b=10),
-        template="plotly_dark",
-        xaxis_title=xlab,
-        yaxis_title=ylab,
+def recommend_wave_delay(wave_count: int, travel_sec: int, gap_sec: int) -> int:
+    cycle_hint = RALLY_FILL_SEC + travel_sec * 2 + gap_sec
+    if wave_count == 1:
+        return 0
+    if wave_count == 2:
+        return min(120, max(60, round(cycle_hint * 0.35)))
+    return min(120, max(45, round(cycle_hint / wave_count)))
+
+def calculate_plan(total_players, rally_size, travel_sec, gap_sec, wave_count, wave_delay_sec):
+    full_rallies = total_players // rally_size
+    partial_players = total_players % rally_size
+    waves = distribute_rallies_across_waves(full_rallies, wave_count)
+    rallies = []
+    rally_index = 0
+
+    for wave_idx, wave_rallies in enumerate(waves):
+        wave_start = 0 if wave_idx == 0 else wave_delay_sec * wave_idx
+        for idx_in_wave, _ in enumerate(wave_rallies):
+            start = wave_start + idx_in_wave * gap_sec
+            depart = start + RALLY_FILL_SEC
+            hit = depart + travel_sec
+            ret = hit + travel_sec
+            rallies.append({
+                "id": rally_index + 1,
+                "wave": wave_idx + 1,
+                "start_sec": start,
+                "depart_sec": depart,
+                "hit_sec": hit,
+                "return_sec": ret,
+                "players": rally_size,
+                "on_time": hit <= TRAP_WINDOW_SEC,
+                "partial": False,
+            })
+            rally_index += 1
+
+    if partial_players > 0:
+        if rallies:
+            start = rallies[-1]["start_sec"] + gap_sec
+            wave = rallies[-1]["wave"]
+        else:
+            start = 0
+            wave = 1
+        depart = start + RALLY_FILL_SEC
+        hit = depart + travel_sec
+        ret = hit + travel_sec
+        rallies.append({
+            "id": len(rallies) + 1,
+            "wave": wave,
+            "start_sec": start,
+            "depart_sec": depart,
+            "hit_sec": hit,
+            "return_sec": ret,
+            "players": partial_players,
+            "on_time": hit <= TRAP_WINDOW_SEC,
+            "partial": True,
+        })
+
+    valid = [r for r in rallies if r["on_time"]]
+    first_hit = min((r["hit_sec"] for r in valid), default=None)
+    last_hit = max((r["hit_sec"] for r in valid), default=None)
+
+    return {
+        "rallies": rallies,
+        "full_rallies": full_rallies,
+        "partial_players": partial_players,
+        "valid_count": len(valid),
+        "first_hit": format_countdown(first_hit) if first_hit is not None else "—",
+        "last_hit": format_countdown(last_hit) if last_hit is not None else "—",
+        "cycle_sec": RALLY_FILL_SEC + travel_sec * 2 + gap_sec,
+        "recommended_delay": recommend_wave_delay(wave_count, travel_sec, gap_sec),
+    }
+
+def build_event_log(rallies):
+    rows = [{"Countdown": "30:00", "Elapsed": "+00:00", "Event": "Bear trapped — timer starts"}]
+
+    for r in rallies:
+        n = r["id"]
+        w = r["wave"]
+        late = "" if r["on_time"] else " ⚠ TOO LATE"
+        rows.append({"Countdown": format_countdown(r["start_sec"]), "Elapsed": f"+{format_time(r['start_sec'])}",
+                       "Event": f"Rally #{n} (Wave {w}) — START ({r['players']} players)"})
+        rows.append({"Countdown": format_countdown(r["depart_sec"]), "Elapsed": f"+{format_time(r['depart_sec'])}",
+                       "Event": f"Rally #{n} (Wave {w}) — DEPARTS (5 min fill done)"})
+        rows.append({"Countdown": format_countdown(r["hit_sec"]), "Elapsed": f"+{format_time(r['hit_sec'])}",
+                       "Event": f"Rally #{n} (Wave {w}) — HITS TRAP{late}"})
+        rows.append({"Countdown": format_countdown(r["return_sec"]), "Elapsed": f"+{format_time(r['return_sec'])}",
+                       "Event": f"Rally #{n} (Wave {w}) — returns home"})
+
+    rows.append({"Countdown": "00:00", "Elapsed": "+30:00", "Event": "Trap window closes"})
+    return rows
+
+# ── Streamlit UI ────────────────────────────────────────────────────────────
+st.set_page_config(page_title="King Shot Rally Planner", page_icon="🐻", layout="wide")
+
+st.title("🐻 King Shot — Bear Trap Rally Planner")
+st.write("Enter your alliance details. All times count **down from 30:00** until the trap closes at **00:00**.")
+
+with st.sidebar:
+    st.header("Inputs")
+
+    total_players = st.number_input(
+        "Number of players",
+        min_value=1, max_value=9999, value=100, step=1,
+        help="How many players will join the bear attack",
     )
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
-    return fig
 
-def fft_spectrum(y, sr):
-    # windowed FFT
-    n = len(y)
-    w = np.hanning(n)
-    Y = np.fft.rfft(y * w)
-    f = np.fft.rfftfreq(n, 1/sr)
-    mag = np.abs(Y)
-    mag = mag / (mag.max() + 1e-12)
-    return f, mag
+    rally_size = st.number_input(
+        "Average rally size",
+        min_value=1, max_value=999, value=20, step=1,
+        help="How many players fit in one rally",
+    )
 
-def envelope(t, attack, decay):
-    # Simple A/D envelope (not a full ADSR)
-    env = np.ones_like(t)
-    if attack > 0:
-        env = np.minimum(env, t / attack)
-    if decay > 0:
-        env = np.minimum(env, 1 - (t / decay) * 0.0)  # keep structure; decay applied below
-        # exponential-ish decay starting after attack
-        start = attack
-        idx = t >= start
-        if np.any(idx):
-            env[idx] = np.exp(-(t[idx] - start) / decay)
-    return np.clip(env, 0, 1)
+    travel_sec = st.number_input(
+        "Distance from trap (seconds, one way)",
+        min_value=10, max_value=600, value=10, step=1,
+        help="Seconds to march to the trap (minimum 10). Same time to return.",
+    )
 
-# -----------------------------
-# Sidebar Controls
-# -----------------------------
-st.sidebar.header("⚙️ Controls")
+    gap_sec = st.number_input(
+        "Time to start a new rally (seconds)",
+        min_value=0, max_value=120, value=5, step=1,
+        help="Seconds between one player starting a rally and the next",
+    )
 
-preset = st.sidebar.selectbox(
-    "🎚️ Preset",
-    ["Custom", "Lo-Fi Tremolo", "FM Bell", "Detuned Synth", "Noisy Drone"],
+    wave_count = st.radio(
+        "Wave strategy",
+        options=[1, 2, 3],
+        format_func=lambda x: f"{x} wave" if x == 1 else f"{x} waves",
+        index=1,
+        horizontal=True,
+    )
+
+    recommended = recommend_wave_delay(wave_count, travel_sec, gap_sec)
+    wave_delay_sec = st.number_input(
+        "Seconds between wave starts",
+        min_value=0, max_value=600, value=recommended, step=5,
+        help=f"Recommended for your settings: {recommended}s",
+    )
+
+    full = total_players // rally_size
+    partial = total_players % rally_size
+    extra = f" + 1 partial rally ({partial} players)" if partial else ""
+    st.info(f"You can run **{full} full rallies**{extra}")
+
+plan = calculate_plan(total_players, rally_size, travel_sec, gap_sec, wave_count, wave_delay_sec)
+
+# Summary
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("First hit on trap", plan["first_hit"])
+c2.metric("Last hit on trap", plan["last_hit"])
+c3.metric("Rallies that hit in time", f"{plan['valid_count']} / {len(plan['rallies'])}")
+c4.metric("Full rally cycle", format_time(plan["cycle_sec"]))
+
+# Rally-by-rally schedule
+st.subheader("Rally schedule — Rally 1, 2, 3… until 00:00")
+
+if plan["rallies"]:
+    schedule = []
+    for r in plan["rallies"]:
+        schedule.append({
+            "Rally": f"#{r['id']}",
+            "Wave": r["wave"],
+            "Players": r["players"],
+            "Start rally at": format_countdown(r["start_sec"]),
+            "Depart at": format_countdown(r["depart_sec"]),
+            "Hit trap at": format_countdown(r["hit_sec"]),
+            "Return at": format_countdown(r["return_sec"]),
+            "OK?": "✅" if r["on_time"] else "❌ Too late",
+        })
+    st.dataframe(pd.DataFrame(schedule), use_container_width=True, hide_index=True)
+else:
+    st.error("Not enough players for even one rally.")
+
+# Full event log
+st.subheader("Full timeline (every step)")
+st.dataframe(
+    pd.DataFrame(build_event_log(plan["rallies"])),
+    use_container_width=True,
+    hide_index=True,
+    height=450,
 )
 
-# sensible defaults per preset
-defaults = {
-    "Custom": dict(),
-    "Lo-Fi Tremolo": dict(w1="Sine", f1=335, a1=0.4, p1=0.0,
-                         w2="Triangle", f2=94, a2=0.25, p2=0.2,
-                         am_on=True, am_rate=6.0, am_depth=0.55,
-                         fm_on=False, fm_rate=0.0, fm_depth=0.0,
-                         noise=0.03, attack=0.02, decay=1.2),
-    "FM Bell": dict(w1="Sine", f1=440, a1=0.9, p1=0.0,
-                    w2="Sine", f2=660, a2=0.0, p2=0.0,
-                    am_on=False, am_rate=0.0, am_depth=0.0,
-                    fm_on=True, fm_rate=2.0, fm_depth=180.0,
-                    noise=0.00, attack=0.005, decay=0.9),
-    "Detuned Synth": dict(w1="Saw", f1=110, a1=0.7, p1=0.0,
-                          w2="Saw", f2=111.2, a2=0.65, p2=0.2,
-                          am_on=False, am_rate=0.0, am_depth=0.0,
-                          fm_on=False, fm_rate=0.0, fm_depth=0.0,
-                          noise=0.01, attack=0.01, decay=1.8),
-    "Noisy Drone": dict(w1="Triangle", f1=55, a1=0.8, p1=0.0,
-                        w2="Sine", f2=56, a2=0.35, p2=1.0,
-                        am_on=True, am_rate=0.3, am_depth=0.25,
-                        fm_on=True, fm_rate=0.2, fm_depth=8.0,
-                        noise=0.08, attack=0.2, decay=3.5),
-}
-
-D = defaults.get(preset, {})
-
-with st.sidebar.expander("🎛️ Oscillator 1", expanded=True):
-    w1 = st.selectbox("Waveform", ["Sine", "Square", "Triangle", "Saw"], index=["Sine","Square","Triangle","Saw"].index(D.get("w1","Sine")))
-    f1 = st.slider("Frequency (Hz)", 20, 2000, int(D.get("f1", 220)), step=1)
-    a1 = st.slider("Amplitude", 0.0, 1.0, float(D.get("a1", 0.8)), step=0.01)
-    p1 = st.slider("Phase", 0.0, float(2*np.pi), float(D.get("p1", 0.0)), step=0.01)
-
-with st.sidebar.expander("🎚️ Oscillator 2 (optional)", expanded=True):
-    w2 = st.selectbox("Waveform ", ["Sine", "Square", "Triangle", "Saw"], index=["Sine","Square","Triangle","Saw"].index(D.get("w2","Sine")))
-    f2 = st.slider("Frequency (Hz) ", 20, 2000, int(D.get("f2", 220)), step=1)
-    a2 = st.slider("Amplitude ", 0.0, 1.0, float(D.get("a2", 0.0)), step=0.01)
-    p2 = st.slider("Phase ", 0.0, float(2*np.pi), float(D.get("p2", 0.0)), step=0.01)
-
-with st.sidebar.expander("🌊 Modulation", expanded=True):
-    am_on = st.toggle("AM (Tremolo)", value=bool(D.get("am_on", False)))
-    am_rate = st.slider("AM Rate (Hz)", 0.1, 30.0, float(D.get("am_rate", 6.0)), step=0.1)
-    am_depth = st.slider("AM Depth", 0.0, 1.0, float(D.get("am_depth", 0.4)), step=0.01)
-
-    st.markdown("---")
-
-    fm_on = st.toggle("FM (Frequency Mod)", value=bool(D.get("fm_on", False)))
-    fm_rate = st.slider("FM Rate (Hz)", 0.1, 30.0, float(D.get("fm_rate", 2.0)), step=0.1)
-    fm_depth = st.slider("FM Depth (Hz)", 0.0, 500.0, float(D.get("fm_depth", 50.0)), step=1.0)
-
-with st.sidebar.expander("🎚️ Texture + Envelope", expanded=True):
-    noise = st.slider("Noise", 0.0, 0.2, float(D.get("noise", 0.01)), step=0.005)
-    attack = st.slider("Attack (s)", 0.0, 0.5, float(D.get("attack", 0.02)), step=0.005)
-    decay = st.slider("Decay (s)", 0.05, 5.0, float(D.get("decay", 1.5)), step=0.05)
-
-with st.sidebar.expander("🧪 Render Settings", expanded=False):
-    duration = st.slider("Duration (s)", 0.5, 5.0, 2.0, step=0.1)
-    sr = st.selectbox("Sample Rate", [22050, 44100, 48000], index=1)
-    view_cycles = st.slider("Show first (ms)", 10, 300, 80, step=5)
-
-# -----------------------------
-# Synthesis
-# -----------------------------
-t = np.linspace(0, duration, int(sr * duration), endpoint=False)
-
-# FM: modulate frequency of osc1 (classic FM feel)
-fm = 0.0
-if fm_on:
-    fm = fm_depth * np.sin(2*np.pi*fm_rate*t)
-
-y1 = a1 * osc_wave(w1, t, f1 + fm, p1)
-y2 = a2 * osc_wave(w2, t, f2, p2)
-
-y = y1 + y2
-
-# AM: multiply by (1 - depth + depth*sin)
-if am_on:
-    am = (1 - am_depth) + am_depth * (0.5 * (1 + np.sin(2*np.pi*am_rate*t)))
-    y = y * am
-
-# envelope + noise
-env = envelope(t, attack, decay)
-y = y * env
-y = y + noise * np.random.normal(size=len(y))
-
-# normalize safely
-mx = np.max(np.abs(y)) + 1e-12
-y_norm = (y / mx) * 0.95
-
-# Short view window
-n_view = int(sr * (view_cycles / 1000.0))
-n_view = max(200, min(n_view, len(t)))
-tv = t[:n_view]
-yv = y_norm[:n_view]
-
-# spectrum
-f, mag = fft_spectrum(y_norm, sr)
-
-# Lissajous: x=osc1, y=osc2 (if osc2 is off, use delayed version of osc1)
-x_l = y1[:n_view]
-y_l = (y2[:n_view] if a2 > 0 else np.roll(y1[:n_view], 10))
-
-# -----------------------------
-# Layout
-# -----------------------------
-colA, colB = st.columns([2.2, 1])
-
-with colB:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.subheader("📌 Live Readout")
-    st.metric("Osc1", f"{w1} @ {f1} Hz")
-    st.metric("Osc2", f"{w2} @ {f2} Hz" if a2 > 0 else "Off")
-    st.metric("AM", "On" if am_on else "Off")
-    st.metric("FM", "On" if fm_on else "Off")
-    st.metric("Noise", f"{noise:.3f}")
-    st.metric("Peak (pre-norm)", f"{mx:.3f}")
-    st.markdown("---")
-    st.write("🔊 **Play Audio**")
-    st.audio(y_norm.astype(np.float32), sample_rate=sr)
-    st.caption("Tip: try **FM Bell** preset for instant coolness.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with colA:
-    tabs = st.tabs(["🌊 Waveform", "📈 Spectrum (FFT)", "🌀 Lissajous", "🧠 What you're hearing"])
-
-    with tabs[0]:
-        fig = nice_plot(tv, yv, "Time Domain (Zoomed View)")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with tabs[1]:
-        # show up to 5k Hz for readability
-        mask = f <= 5000
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=f[mask], y=mag[mask], mode="lines", line=dict(width=3)))
-        fig2.update_layout(
-            title="Frequency Spectrum (Windowed FFT)",
-            height=420,
-            margin=dict(l=10, r=10, t=60, b=10),
-            template="plotly_dark",
-            xaxis_title="Frequency (Hz)",
-            yaxis_title="Normalized Magnitude",
-        )
-        fig2.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
-        fig2.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
-        st.plotly_chart(fig2, use_container_width=True)
-        st.caption("Harmonics pop up for non-sine waves (square/saw/triangle). FM spreads energy into sidebands.")
-
-    with tabs[2]:
-        fig3 = go.Figure()
-        fig3.add_trace(go.Scatter(
-            x=x_l, y=y_l, mode="lines",
-            line=dict(width=3),
-        ))
-        fig3.update_layout(
-            title="Lissajous (Phase Relationship)",
-            height=420,
-            margin=dict(l=10, r=10, t=60, b=10),
-            template="plotly_dark",
-            xaxis_title="Osc1",
-            yaxis_title="Osc2",
-        )
-        fig3.update_xaxes(scaleanchor="y", scaleratio=1, showgrid=True, gridcolor="rgba(255,255,255,0.08)")
-        fig3.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
-        st.plotly_chart(fig3, use_container_width=True)
-        st.caption("Perfect circles/ellipses = clean phase relation. Messy shapes = modulation/noise/detune.")
-
-    with tabs[3]:
-        st.markdown(
-            """
-            **Quick intuition:**
-            - **Waveform type** changes harmonic content (tone color).
-            - **AM (tremolo)** = volume pulsing at AM rate.
-            - **FM** = pitch wiggle / rich metallic tones; larger depth = more sidebands.
-            - **Detuning** (f1 ≠ f2) = beating / chorus effect.
-            - **Noise** adds grit (lo-fi / wind / analog-ish texture).
-            """
-        )
-        st.markdown("**Try these:**")
-        st.write("- Set Osc1=Saw, Osc2=Saw, f2 = f1 + 0.8 Hz → *instant synth detune*")
-        st.write("- Turn FM on with depth 150–250 Hz and rate ~2–6 Hz → *bell / metallic*")
-        st.write("- AM on at ~4–8 Hz depth ~0.5 → *classic tremolo*")
-
-st.divider()
-st.caption("Built with NumPy + Plotly + Streamlit. Minimal dependencies, maximum vibes.")
+st.markdown("---")
+st.caption("Deploy this file on Streamlit Cloud → share the link with your alliance.")
